@@ -32,6 +32,7 @@ type JPake struct {
 	// Variables which can be shared
 	x1Gx, x1Gy *big.Int
 	x2Gx, x2Gy *big.Int
+	sessionKey []byte
 
 	// Received Variables / Cached variables
 	x2s                  *big.Int
@@ -46,9 +47,6 @@ type JPake struct {
 	x2    *big.Int
 	s     *big.Int
 	state int
-
-	IsVerified bool
-	SessionKey []byte
 }
 
 type ZKPMsg struct {
@@ -85,9 +83,9 @@ func InitWithCurve(pw string, curve EllipticCurve) (*JPake, error) {
 
 func InitWithCurveAndHashFn(pw string, curve EllipticCurve, hashFn HashFnType) (*JPake, error) {
 	jp := new(JPake)
-	jp.IsVerified = false
 	jp.curve = curve
 	jp.hashFn = hashFn
+	jp.sessionKey = []byte{} // make sure to invalidate the session key
 
 	jp.gx = curve.Params().Gx
 	jp.gy = curve.Params().Gy
@@ -98,11 +96,11 @@ func InitWithCurveAndHashFn(pw string, curve EllipticCurve, hashFn HashFnType) (
 	jp.s = s
 
 	// Generate private random variables
-	rand1, err := RandomNumberInCurveRange(curve)
+	rand1, err := randomNumberInCurveRange(curve)
 	if err != nil {
 		return jp, err
 	}
-	rand2, err := RandomNumberInCurveRange(curve)
+	rand2, err := randomNumberInCurveRange(curve)
 	if err != nil {
 		return jp, err
 	}
@@ -113,7 +111,7 @@ func InitWithCurveAndHashFn(pw string, curve EllipticCurve, hashFn HashFnType) (
 	return jp, err
 }
 
-func (jp *JPake) SetState(x1 *big.Int, x2 *big.Int) {
+func (jp *JPake) SetRandomState(x1 *big.Int, x2 *big.Int) {
 	// This is a convenience function to let you set the state of the
 	// JPAKE object for debugging only
 	jp.x1 = x1
@@ -128,7 +126,7 @@ func (jp *JPake) computeZKP(x *big.Int, GeneratorX *big.Int, GeneratorY *big.Int
 	// Generator used to compute the ZKP
 
 	// 1. Pick a random v \in Z_q* and compute t = vG
-	v, err := RandomNumberInCurveRange(jp.curve)
+	v, err := randomNumberInCurveRange(jp.curve)
 	if err != nil {
 		return ZKPMsg{}, err
 	}
@@ -311,8 +309,16 @@ func (jp *JPake) ComputeSharedKey(jsonMsgfromB []byte) ([]byte, error) {
 	// Ka = (B - (G4 x [x2*s])) x [x2]
 	Kax, _ := jp.curve.ScalarMult(tmp2x, tmp2y, jp.x2.Bytes())
 	sharedKey := jp.hashFn(asBase64String(Kax))
+	jp.sessionKey = sharedKey
 
 	return sharedKey, nil
+}
+
+func (jp *JPake) SessionKey() ([]byte, error) {
+	if len(jp.sessionKey) > 0 {
+		return jp.sessionKey, nil
+	}
+	return []byte{}, errors.New("Shared session key unavailable.")
 }
 
 // Utilities
@@ -332,7 +338,7 @@ func fromBase64String(input string) (*big.Int, error) {
 }
 
 // Some curve utilities
-func RandomNumberInCurveRange(curve EllipticCurve) (*big.Int, error) {
+func randomNumberInCurveRange(curve EllipticCurve) (*big.Int, error) {
 	CurveNMinus1 := new(big.Int)
 	CurveNMinus1 = CurveNMinus1.Sub(curve.Params().N, big.NewInt(1))
 	rand1, err := rand.Int(rand.Reader, CurveNMinus1)
