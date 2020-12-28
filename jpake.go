@@ -1,7 +1,9 @@
 package jpake
 
 import (
+	"bytes"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -40,6 +42,7 @@ type JPake struct {
 	otherx2Gx, otherx2Gy *big.Int
 	gx, gy               *big.Int // For convenience
 	hashFn               HashFnType
+	kdf                  KDFType
 	curve                EllipticCurve
 
 	// Private Variables
@@ -71,20 +74,26 @@ type Round2Message struct {
 	XsZKP ZKPMsg `json:"xsZKP"`
 }
 
+type CheckSessionKeyMessage struct {
+	SessionKey string `json:"SessionKey"`
+}
+
 type HashFnType func(string) []byte
+type KDFType func([]byte) []byte
 
 func Init(pw string) (*JPake, error) {
-	return InitWithCurveAndHashFn(pw, elliptic.P256(), sha256HashFn)
+	return InitWithCurveAndHashFns(pw, elliptic.P256(), sha256HashFn, hmacsha256KDF)
 }
 
 func InitWithCurve(pw string, curve EllipticCurve) (*JPake, error) {
-	return InitWithCurveAndHashFn(pw, curve, sha256HashFn)
+	return InitWithCurveAndHashFns(pw, curve, sha256HashFn, hmacsha256KDF)
 }
 
-func InitWithCurveAndHashFn(pw string, curve EllipticCurve, hashFn HashFnType) (*JPake, error) {
+func InitWithCurveAndHashFns(pw string, curve EllipticCurve, hashFn HashFnType, kdf KDFType) (*JPake, error) {
 	jp := new(JPake)
 	jp.curve = curve
 	jp.hashFn = hashFn
+	jp.kdf = kdf
 	jp.sessionKey = []byte{} // make sure to invalidate the session key
 
 	jp.gx = curve.Params().Gx
@@ -308,7 +317,7 @@ func (jp *JPake) ComputeSharedKey(jsonMsgfromB []byte) ([]byte, error) {
 
 	// Ka = (B - (G4 x [x2*s])) x [x2]
 	Kax, _ := jp.curve.ScalarMult(tmp2x, tmp2y, jp.x2.Bytes())
-	sharedKey := jp.hashFn(asBase64String(Kax))
+	sharedKey := jp.kdf([]byte(asBase64String(Kax)))
 	jp.sessionKey = sharedKey
 
 	return sharedKey, nil
@@ -319,6 +328,72 @@ func (jp *JPake) SessionKey() ([]byte, error) {
 		return jp.sessionKey, nil
 	}
 	return []byte{}, errors.New("Shared session key unavailable.")
+}
+
+func (jp *JPake) ComputeCheckSessionKeyMsg() ([]byte, error) {
+	checkSessionKeyMac := jp.computeSessionKeyMac(
+		jp.x1Gx.Bytes(),
+		jp.x2Gx.Bytes(),
+		jp.otherx1Gx.Bytes(),
+		jp.otherx2Gx.Bytes(),
+	)
+
+	checkSessionKeyMsg := CheckSessionKeyMessage{
+		SessionKey: base64.StdEncoding.EncodeToString(checkSessionKeyMac),
+	}
+
+	json, err := json.Marshal(checkSessionKeyMsg)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return json, nil
+}
+
+func (jp *JPake) CheckReceivedSessionKeyMsg(jsonMsgfromB []byte) bool {
+	var sessionKeyMsg CheckSessionKeyMessage
+	err := json.Unmarshal(jsonMsgfromB, &sessionKeyMsg)
+	if err != nil {
+		log.Println("Could not unmarshall check session key msg")
+		return false
+	}
+	receivedSessionKeyMac, err := base64.StdEncoding.DecodeString(sessionKeyMsg.SessionKey)
+	if err != nil {
+		log.Println("Could not unmarshall check session key msg")
+		return false
+	}
+	toCheckAgainst := jp.computeSessionKeyMac(
+		jp.otherx1Gx.Bytes(),
+		jp.otherx2Gx.Bytes(),
+		jp.x1Gx.Bytes(),
+		jp.x2Gx.Bytes(),
+	)
+
+	return bytes.Compare(receivedSessionKeyMac, toCheckAgainst) == 0
+}
+
+func (jp *JPake) computeSessionKeyMac(
+	x1G []byte,
+	x2G []byte,
+	otherx1G []byte,
+	otherx2G []byte,
+) []byte {
+	kprime := jp.kdf(append(jp.sessionKey, []byte("KC_1_U")...))
+
+	slices := [][]byte{
+		[]byte("KC_1_U"),
+		[]byte("Alice"),
+		[]byte("Bob"),
+		x1G,
+		x2G,
+		otherx1G,
+		otherx2G,
+	}
+	macTagAlice := hmacsha256(
+		kprime,
+		concatByteSlices(slices),
+	)
+	return macTagAlice
 }
 
 // Utilities
@@ -335,6 +410,19 @@ func fromBase64String(input string) (*big.Int, error) {
 	res := new(big.Int)
 	res.SetBytes(data)
 	return res, err
+}
+
+func concatByteSlices(slices [][]byte) []byte {
+	var totalLen int = 0
+	for _, s := range slices {
+		totalLen += len(s)
+	}
+	tmp := make([]byte, totalLen)
+	var i int
+	for _, s := range slices {
+		i += copy(tmp[i:], s)
+	}
+	return tmp
 }
 
 // Some curve utilities
@@ -356,4 +444,14 @@ func negateCurvePoint(x *big.Int, y *big.Int) (*big.Int, *big.Int) {
 func sha256HashFn(s string) []byte {
 	hash := sha256.Sum256([]byte(s))
 	return hash[:]
+}
+
+func hmacsha256KDF(input []byte) []byte {
+	return hmacsha256(input, []byte("kdfsecret")) // use a known key for determinism
+}
+
+func hmacsha256(input []byte, key []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(input)
+	return mac.Sum(nil)
 }

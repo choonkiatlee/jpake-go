@@ -67,4 +67,20 @@ func main() {
 	fmt.Println("\nAlice key: ", sharedKeyA)
 	fmt.Println("Bob key: ", sharedKeyB)
 
+	checkKeyMsgA, err := jpA.ComputeCheckSessionKeyMsg()
+	if err != nil {
+		panic(err)
+	}
+	checkKeyMsgB, err := jpB.ComputeCheckSessionKeyMsg()
+	if err != nil {
+		panic(err)
+	}
+
+	validA := jpA.CheckReceivedSessionKeyMsg(checkKeyMsgB)
+	validB := jpB.CheckReceivedSessionKeyMsg(checkKeyMsgA)
+
+	fmt.Println("\nChecking Generated Shared Keys...")
+	fmt.Println("\nAlice check: ", validA)
+	fmt.Println("Bob check: ", validB)
+
 }
